@@ -1,0 +1,22 @@
+# Environment / secrets — NEVER commit these
+.env
+
+# PyIceberg local SQLite catalog metadata
+iceberg_catalog.db
+iceberg_catalog.db-shm
+iceberg_catalog.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
