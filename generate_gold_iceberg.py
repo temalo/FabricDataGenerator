@@ -26,7 +26,7 @@ Gold Layer Tables:
 
 Usage:
   1. Install dependencies:
-       pip install "pyiceberg[s3,pyarrow]" faker pyarrow boto3 python-dotenv
+      pip install "pyiceberg[sql-sqlite]" faker pyarrow boto3 python-dotenv
 
   2. Populate .env in the same directory (copy from .env.example and fill in values):
        AWS_ACCESS_KEY_ID=YOUR_KEY
@@ -38,6 +38,9 @@ Usage:
   3. Run (examples):
        # Full refresh — drop all tables and regenerate with default row counts
        python generate_gold_iceberg.py
+
+      # Full refresh + clean slate (purge all warehouse files first)
+      python generate_gold_iceberg.py --clean
 
        # Full refresh at 10% of default row counts
        python generate_gold_iceberg.py --scale 0.1
@@ -54,6 +57,11 @@ Usage:
                                     records with non-overlapping keys; existing
                                     data is preserved and no duplicate PKs are
                                     introduced.
+        --clean                         Only applies with full-refresh. After
+                                                                        dropping catalog tables, also purge every
+                                                                        object under the warehouse path and reset
+                                                                        local catalog metadata for a true empty
+                                                                        slate.
     --scale FACTOR                  Float multiplier applied to every row-count
                                     constant (default: 1.0).  E.g. --scale 2
                                     doubles every table's record count.
@@ -154,6 +162,12 @@ def parse_args():
              "append: add new records without touching existing data.",
     )
     p.add_argument(
+        "--clean",
+        action="store_true",
+        help="Only with full-refresh: purge all files under the warehouse path "
+             "and reset local catalog metadata for an empty slate.",
+    )
+    p.add_argument(
         "--scale",
         type=float,
         default=1.0,
@@ -161,7 +175,10 @@ def parse_args():
         help="Multiply all row-count defaults by FACTOR (default: 1.0). "
              "E.g. --scale 0.1 generates 10%% of the default record counts.",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.clean and args.mode != "full-refresh":
+        p.error("--clean can only be used with --mode full-refresh")
+    return args
 
 # ─── Industry-realistic reference data ────────────────────────────────────────
 
@@ -270,12 +287,12 @@ def purge_s3_warehouse():
     log.info(f"Purged {deleted:,} S3 objects from s3://{S3_BUCKET}/{prefix}")
 
 
-def drop_all_tables(catalog, namespace: str):
+def drop_all_tables(catalog, namespace: str, clean: bool = False):
     """
     Full-refresh cleanup:
       1. Drop every table from the Iceberg catalog (removes metadata).
-      2. Bulk-delete all S3 objects under the warehouse prefix (removes data files).
-      3. Delete the local SQLite catalog DB so it is rebuilt from scratch.
+      2. If clean=True, bulk-delete every object under the warehouse path.
+      3. If clean=True, delete the local SQLite catalog DB so it is rebuilt from scratch.
     """
     # 1. Remove catalog entries (best-effort; S3 purge handles the data files)
     for table_name in SCHEMAS:
@@ -285,6 +302,9 @@ def drop_all_tables(catalog, namespace: str):
             log.info(f"Dropped catalog entry: {full_name}")
         except Exception:
             pass  # Table didn't exist — nothing to do
+
+    if not clean:
+        return
 
     # 2. Purge all data and metadata files from S3
     purge_s3_warehouse()
@@ -956,6 +976,7 @@ def main():
     args = parse_args()
     mode  = args.mode
     scale = args.scale
+    clean = args.clean
 
     # Apply scale factor to all row counts (minimum 1 row each)
     n_customers = max(1, int(N_CUSTOMERS * scale))
@@ -971,6 +992,7 @@ def main():
 
     log.info("=" * 60)
     log.info(f"Mode      : {mode}")
+    log.info(f"Clean     : {clean}")
     log.info(f"Scale     : {scale}x")
     log.info(f"Warehouse : {WAREHOUSE}")
     log.info(f"Region    : {AWS_REGION}")
@@ -980,13 +1002,17 @@ def main():
     ns = "gold"
     ensure_namespace(catalog, ns)
 
-    # ── Full-refresh: wipe every table, all S3 data, and local catalog DB ────────
+    # ── Full-refresh: drop catalog tables; optional clean-slate file purge ────────
     if mode == "full-refresh":
-        log.info("Full-refresh: purging catalog, S3 data, and local catalog DB …")
-        drop_all_tables(catalog, ns)
-        # Reload catalog — the SQLite DB was deleted and must be recreated
-        catalog = get_catalog()
-        ensure_namespace(catalog, ns)
+        if clean:
+            log.info("Full-refresh + clean: dropping tables, purging warehouse files, and resetting local catalog DB …")
+        else:
+            log.info("Full-refresh: dropping catalog tables (warehouse files are retained; use --clean to purge) …")
+        drop_all_tables(catalog, ns, clean=clean)
+        if clean:
+            # Reload catalog — the SQLite DB was deleted and must be recreated
+            catalog = get_catalog()
+            ensure_namespace(catalog, ns)
         # All dim start_keys begin at 1
         sup_start = loc_start = emp_start = cust_start = prod_start = 1
         date_exists = False

@@ -1,0 +1,5 @@
+pyiceberg[sql-sqlite]
+faker
+pyarrow
+boto3
+python-dotenv
