@@ -35,12 +35,38 @@ Usage:
        S3_BUCKET=lakehousedata-638442050476-us-east-2-an
        S3_PREFIX=lakehouse/gold
 
-  3. Run:
+  3. Run (examples):
+       # Full refresh — drop all tables and regenerate with default row counts
        python generate_gold_iceberg.py
+
+       # Full refresh at 10% of default row counts
+       python generate_gold_iceberg.py --scale 0.1
+
+       # Append new records (no deletes, no duplicate keys)
+       python generate_gold_iceberg.py --mode append
+
+       # Append at 50% of default row counts
+       python generate_gold_iceberg.py --mode append --scale 0.5
+
+  Flags:
+    --mode  {full-refresh|append}   full-refresh (default): drop all tables and
+                                    regenerate from scratch.  append: add new
+                                    records with non-overlapping keys; existing
+                                    data is preserved and no duplicate PKs are
+                                    introduced.
+    --scale FACTOR                  Float multiplier applied to every row-count
+                                    constant (default: 1.0).  E.g. --scale 2
+                                    doubles every table's record count.
+
+  Default row counts (at --scale 1.0):
+    Customers: 5,000  |  Products: 3,000  |  Suppliers: 500
+    Employees: 800    |  Locations: 120
+    Sales: 200,000    |  POs: 40,000  |  Inv snapshots: 50,000  |  Returns: 8,000
 
   NOTE: Never commit .env to version control — it is listed in .gitignore.
 """
 
+import argparse
 import os
 import uuid
 import random
@@ -62,6 +88,7 @@ load_dotenv(dotenv_path=_env_path)
 # ─── Third-party imports (after env is loaded) ─────────────────────────────────
 import boto3
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from faker import Faker
 from pyiceberg.catalog import load_catalog
@@ -111,6 +138,30 @@ N_RETURNS    = 8_000
 
 DATE_START = date(2020, 1, 1)
 DATE_END   = date(2024, 12, 31)
+
+# ─── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Gold Layer Iceberg Data Generator",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--mode",
+        choices=["full-refresh", "append"],
+        default="full-refresh",
+        help="full-refresh (default): drop all tables and regenerate. "
+             "append: add new records without touching existing data.",
+    )
+    p.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        metavar="FACTOR",
+        help="Multiply all row-count defaults by FACTOR (default: 1.0). "
+             "E.g. --scale 0.1 generates 10%% of the default record counts.",
+    )
+    return p.parse_args()
 
 # ─── Industry-realistic reference data ────────────────────────────────────────
 
@@ -182,6 +233,73 @@ def ensure_namespace(catalog, namespace: str):
         log.info(f"Created namespace: {namespace}")
     except Exception:
         log.info(f"Namespace already exists: {namespace}")
+
+
+def get_max_int_key(catalog, full_name: str, key_col: str) -> int:
+    """Return the current max integer key value in a table, or 0 if empty/missing."""
+    try:
+        tbl = catalog.load_table(full_name)
+        arrow_tbl = tbl.scan(selected_fields=(key_col,)).to_arrow()
+        if arrow_tbl.num_rows == 0:
+            return 0
+        return pc.max(arrow_tbl.column(key_col)).as_py() or 0
+    except Exception:
+        return 0
+
+
+def purge_s3_warehouse():
+    """Delete every S3 object under the warehouse prefix."""
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
+    prefix = S3_PREFIX.rstrip("/") + "/"
+    paginator = s3.get_paginator("list_objects_v2")
+    deleted = 0
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        objects = page.get("Contents", [])
+        if not objects:
+            continue
+        s3.delete_objects(
+            Bucket=S3_BUCKET,
+            Delete={"Objects": [{"Key": o["Key"]} for o in objects]},
+        )
+        deleted += len(objects)
+    log.info(f"Purged {deleted:,} S3 objects from s3://{S3_BUCKET}/{prefix}")
+
+
+def drop_all_tables(catalog, namespace: str):
+    """
+    Full-refresh cleanup:
+      1. Drop every table from the Iceberg catalog (removes metadata).
+      2. Bulk-delete all S3 objects under the warehouse prefix (removes data files).
+      3. Delete the local SQLite catalog DB so it is rebuilt from scratch.
+    """
+    # 1. Remove catalog entries (best-effort; S3 purge handles the data files)
+    for table_name in SCHEMAS:
+        full_name = f"{namespace}.{table_name}"
+        try:
+            catalog.drop_table(full_name)
+            log.info(f"Dropped catalog entry: {full_name}")
+        except Exception:
+            pass  # Table didn't exist — nothing to do
+
+    # 2. Purge all data and metadata files from S3
+    purge_s3_warehouse()
+
+    # 3. Remove the local SQLite catalog so PyIceberg starts with a blank slate.
+    #    On Windows the file is locked while the SQLAlchemy connection pool is
+    #    open, so we dispose the engine first before deleting.
+    catalog_db = Path(__file__).parent / "iceberg_catalog.db"
+    if catalog_db.exists():
+        try:
+            catalog.engine.dispose()
+        except AttributeError:
+            pass  # Non-SQL catalog implementation — no engine to dispose
+        catalog_db.unlink()
+        log.info(f"Removed local catalog DB: {catalog_db}")
 
 # ─── Iceberg schema definitions ───────────────────────────────────────────────
 
@@ -430,10 +548,10 @@ PARTITION_SPECS = {
 
 # ─── Data generators ──────────────────────────────────────────────────────────
 
-def gen_dim_customer(n):
+def gen_dim_customer(n, start_key=1):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = []
-    for i in range(1, n + 1):
+    for i in range(start_key, start_key + n):
         created    = rand_date(date(2010, 1, 1), date(2022, 12, 31))
         last_order = rand_date(created, DATE_END)
         rows.append({
@@ -456,11 +574,11 @@ def gen_dim_customer(n):
     return rows
 
 
-def gen_dim_product(n, supplier_keys):
+def gen_dim_product(n, supplier_keys, start_key=1):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     brands = [fake.company() for _ in range(80)]
     rows = []
-    for i in range(1, n + 1):
+    for i in range(start_key, start_key + n):
         cat  = random.choice(PRODUCT_CATEGORIES)
         cost = round(random.uniform(0.50, 1_500.00), 4)
         rows.append({
@@ -483,10 +601,10 @@ def gen_dim_product(n, supplier_keys):
     return rows
 
 
-def gen_dim_supplier(n):
+def gen_dim_supplier(n, start_key=1):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = []
-    for i in range(1, n + 1):
+    for i in range(start_key, start_key + n):
         rows.append({
             "supplier_key":   i,
             "supplier_id":    f"SUP-{i:05d}",
@@ -502,10 +620,10 @@ def gen_dim_supplier(n):
     return rows
 
 
-def gen_dim_employee(n, location_keys):
+def gen_dim_employee(n, location_keys, start_key=1):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     rows = []
-    for i in range(1, n + 1):
+    for i in range(start_key, start_key + n):
         rows.append({
             "employee_key":        i,
             "employee_id":         f"EMP-{i:05d}",
@@ -519,7 +637,7 @@ def gen_dim_employee(n, location_keys):
     return rows
 
 
-def gen_dim_location(n):
+def gen_dim_location(n, start_key=1):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     state_region = {
         "CA":"W","OR":"W","WA":"W","NV":"W","AZ":"W",
@@ -532,7 +650,7 @@ def gen_dim_location(n):
         "MT":"MW2","ID":"MW2","WY":"MW2","UT":"MW2","NM":"MW2",
     }
     rows = []
-    for i in range(1, n + 1):
+    for i in range(start_key, start_key + n):
         state = random.choice(US_STATES)
         rows.append({
             "location_key":           i,
@@ -812,35 +930,15 @@ def rows_to_arrow(rows: list, iceberg_schema: Schema) -> pa.Table:
 
 # ─── Table writer ─────────────────────────────────────────────────────────────
 
-def drop_table_if_exists(catalog, full_name: str):
-    """Drop a table from the catalog if it exists (does not delete S3 data files)."""
-    try:
-        catalog.drop_table(full_name)
-        log.info(f"Dropped existing table {full_name} (stale metadata)")
-    except Exception:
-        pass  # Table didn't exist — nothing to do
-
-
-def write_table(catalog, namespace: str, table_name: str, rows: list,
-                recreate: bool = False):
-    """
-    Write rows to an Iceberg table.
-
-    Args:
-        recreate: If True, drop and recreate the table before writing.
-                  Use this for tables whose partition spec may have changed
-                  between runs (i.e. all fact and mart tables).
-    """
+def write_table(catalog, namespace: str, table_name: str, rows: list):
+    """Create the table if it doesn't exist, then append rows."""
     full_name      = f"{namespace}.{table_name}"
     iceberg_schema = SCHEMAS[table_name]
     partition_spec = PARTITION_SPECS.get(table_name, PartitionSpec())
 
-    if recreate:
-        drop_table_if_exists(catalog, full_name)
-
     try:
         table = catalog.load_table(full_name)
-        log.info(f"Table {full_name} already exists — appending")
+        log.info(f"Table {full_name} exists — appending")
     except Exception:
         log.info(f"Creating table {full_name}")
         table = catalog.create_table(
@@ -855,7 +953,25 @@ def write_table(catalog, namespace: str, table_name: str, rows: list,
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    args = parse_args()
+    mode  = args.mode
+    scale = args.scale
+
+    # Apply scale factor to all row counts (minimum 1 row each)
+    n_customers = max(1, int(N_CUSTOMERS * scale))
+    n_products  = max(1, int(N_PRODUCTS  * scale))
+    n_suppliers = max(1, int(N_SUPPLIERS * scale))
+    n_employees = max(1, int(N_EMPLOYEES * scale))
+    n_locations = max(1, int(N_LOCATIONS * scale))
+    n_sales     = max(1, int(N_SALES     * scale))
+    n_po        = max(1, int(N_PO        * scale))
+    n_inv_snaps = max(1, int(N_INV_SNAPS * scale))
+    n_returns   = max(1, int(N_RETURNS   * scale))
+    n_mart_daily = max(1, int(20_000     * scale))
+
     log.info("=" * 60)
+    log.info(f"Mode      : {mode}")
+    log.info(f"Scale     : {scale}x")
     log.info(f"Warehouse : {WAREHOUSE}")
     log.info(f"Region    : {AWS_REGION}")
     log.info("=" * 60)
@@ -864,75 +980,99 @@ def main():
     ns = "gold"
     ensure_namespace(catalog, ns)
 
-    # Dimensions (order matters — later dims reference earlier keys)
+    # ── Full-refresh: wipe every table, all S3 data, and local catalog DB ────────
+    if mode == "full-refresh":
+        log.info("Full-refresh: purging catalog, S3 data, and local catalog DB …")
+        drop_all_tables(catalog, ns)
+        # Reload catalog — the SQLite DB was deleted and must be recreated
+        catalog = get_catalog()
+        ensure_namespace(catalog, ns)
+        # All dim start_keys begin at 1
+        sup_start = loc_start = emp_start = cust_start = prod_start = 1
+        date_exists = False
+    else:
+        # ── Append: read existing max keys so new records never collide ───────
+        log.info("Append mode: reading existing key ranges …")
+        sup_start  = get_max_int_key(catalog, f"{ns}.dim_supplier",  "supplier_key")  + 1
+        loc_start  = get_max_int_key(catalog, f"{ns}.dim_location",  "location_key")  + 1
+        emp_start  = get_max_int_key(catalog, f"{ns}.dim_employee",  "employee_key")  + 1
+        cust_start = get_max_int_key(catalog, f"{ns}.dim_customer",  "customer_key")  + 1
+        prod_start = get_max_int_key(catalog, f"{ns}.dim_product",   "product_key")   + 1
+        log.info(
+            f"  Key offsets → suppliers: {sup_start}, locations: {loc_start}, "
+            f"employees: {emp_start}, customers: {cust_start}, products: {prod_start}"
+        )
+        # dim_date covers a fixed date range; skip if data already exists
+        date_exists = get_max_int_key(catalog, f"{ns}.dim_date", "date_key") > 0
+
+    # ── Dimensions (order matters — later dims reference earlier keys) ─────────
     log.info("── Dimensions ──────────────────────────────────────────")
 
-    suppliers = gen_dim_supplier(N_SUPPLIERS)
+    suppliers = gen_dim_supplier(n_suppliers, start_key=sup_start)
     write_table(catalog, ns, "dim_supplier", suppliers)
     supplier_keys = [r["supplier_key"] for r in suppliers]
 
-    locations = gen_dim_location(N_LOCATIONS)
+    locations = gen_dim_location(n_locations, start_key=loc_start)
     write_table(catalog, ns, "dim_location", locations)
     location_keys = [r["location_key"] for r in locations]
 
-    employees = gen_dim_employee(N_EMPLOYEES, location_keys)
+    employees = gen_dim_employee(n_employees, location_keys, start_key=emp_start)
     write_table(catalog, ns, "dim_employee", employees)
     employee_keys = [r["employee_key"] for r in employees]
 
-    customers = gen_dim_customer(N_CUSTOMERS)
+    customers = gen_dim_customer(n_customers, start_key=cust_start)
     write_table(catalog, ns, "dim_customer", customers)
     customer_keys = [r["customer_key"] for r in customers]
 
-    products = gen_dim_product(N_PRODUCTS, supplier_keys)
+    products = gen_dim_product(n_products, supplier_keys, start_key=prod_start)
     write_table(catalog, ns, "dim_product", products)
     product_keys = [r["product_key"] for r in products]
 
-    dates = gen_dim_date(DATE_START, DATE_END)
-    write_table(catalog, ns, "dim_date", dates)
-    date_keys = [r["date_key"] for r in dates]
+    if date_exists:
+        log.info("dim_date already populated — skipping (date range unchanged)")
+        # Read all date_keys so fact tables can reference them
+        tbl = catalog.load_table(f"{ns}.dim_date")
+        date_keys = tbl.scan(selected_fields=("date_key",)).to_arrow().column("date_key").to_pylist()
+    else:
+        dates = gen_dim_date(DATE_START, DATE_END)
+        write_table(catalog, ns, "dim_date", dates)
+        date_keys = [r["date_key"] for r in dates]
 
-    # Facts
+    # ── Facts (UUID primary keys are globally unique across runs) ─────────────
     log.info("── Facts ───────────────────────────────────────────────")
 
-    log.info(f"Generating fact_sales_order ({N_SALES:,} rows) …")
+    log.info(f"Generating fact_sales_order ({n_sales:,} rows) …")
     write_table(catalog, ns, "fact_sales_order",
-                gen_fact_sales_order(N_SALES, customer_keys, product_keys,
-                                     employee_keys, location_keys, date_keys),
-                recreate=True)
+                gen_fact_sales_order(n_sales, customer_keys, product_keys,
+                                     employee_keys, location_keys, date_keys))
 
-    log.info(f"Generating fact_purchase_order ({N_PO:,} rows) …")
+    log.info(f"Generating fact_purchase_order ({n_po:,} rows) …")
     write_table(catalog, ns, "fact_purchase_order",
-                gen_fact_purchase_order(N_PO, supplier_keys, product_keys,
-                                        location_keys, employee_keys, date_keys),
-                recreate=True)
+                gen_fact_purchase_order(n_po, supplier_keys, product_keys,
+                                        location_keys, employee_keys, date_keys))
 
-    log.info(f"Generating fact_inventory_snapshot ({N_INV_SNAPS:,} rows) …")
+    log.info(f"Generating fact_inventory_snapshot ({n_inv_snaps:,} rows) …")
     write_table(catalog, ns, "fact_inventory_snapshot",
-                gen_fact_inventory_snapshot(N_INV_SNAPS, product_keys, location_keys, date_keys),
-                recreate=True)
+                gen_fact_inventory_snapshot(n_inv_snaps, product_keys, location_keys, date_keys))
 
-    log.info(f"Generating fact_returns ({N_RETURNS:,} rows) …")
+    log.info(f"Generating fact_returns ({n_returns:,} rows) …")
     write_table(catalog, ns, "fact_returns",
-                gen_fact_returns(N_RETURNS, customer_keys, product_keys, location_keys, date_keys),
-                recreate=True)
+                gen_fact_returns(n_returns, customer_keys, product_keys, location_keys, date_keys))
 
-    # Marts
+    # ── Marts ─────────────────────────────────────────────────────────────────
     log.info("── Marts ───────────────────────────────────────────────")
 
-    log.info("Generating mart_sales_summary_daily (20,000 rows) …")
+    log.info(f"Generating mart_sales_summary_daily ({n_mart_daily:,} rows) …")
     write_table(catalog, ns, "mart_sales_summary_daily",
-                gen_mart_sales_summary_daily(20_000, customer_keys, product_keys, date_keys),
-                recreate=True)
+                gen_mart_sales_summary_daily(n_mart_daily, customer_keys, product_keys, date_keys))
 
     log.info("Generating mart_product_velocity …")
     write_table(catalog, ns, "mart_product_velocity",
-                gen_mart_product_velocity(product_keys, location_keys),
-                recreate=True)
+                gen_mart_product_velocity(product_keys, location_keys))
 
     log.info("Generating mart_customer_360 …")
     write_table(catalog, ns, "mart_customer_360",
-                gen_mart_customer_360(customer_keys),
-                recreate=True)
+                gen_mart_customer_360(customer_keys))
 
     log.info("=" * 60)
     log.info("All Gold layer tables written successfully!")
