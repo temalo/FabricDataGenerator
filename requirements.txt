@@ -3,3 +3,5 @@ faker
 pyarrow
 boto3
 python-dotenv
+azure-identity
+azure-storage-file-datalake
