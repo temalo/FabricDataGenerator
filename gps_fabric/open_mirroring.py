@@ -212,6 +212,48 @@ def write_json(data: Mapping[str, object], path: Path) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def validate_table_keys(
+    rows: Sequence[Mapping[str, object]],
+    spec: TableSpec,
+    allow_duplicates: bool = False,
+) -> None:
+    seen_keys = set()
+    for index, row in enumerate(rows, start=1):
+        key = tuple(row.get(column) for column in spec.key_columns)
+        if any(value is None for value in key):
+            raise ValueError(
+                f"Table '{spec.name}' row {index} has a null primary key value for {spec.key_columns}."
+            )
+        if not allow_duplicates and key in seen_keys:
+            raise ValueError(
+                f"Table '{spec.name}' contains duplicate primary key value {key} for {spec.key_columns}."
+            )
+        seen_keys.add(key)
+
+
+def validate_dataset_primary_keys(dataset: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+    for spec in TABLE_SPECS:
+        if spec.name not in dataset:
+            raise ValueError(f"Dataset is missing required table '{spec.name}'.")
+        validate_table_keys(dataset[spec.name], spec)
+
+
+def validate_change_rows(changes: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+    for spec in TABLE_SPECS:
+        rows = changes.get(spec.name, [])
+        for index, row in enumerate(rows, start=1):
+            marker = row.get("__rowMarker__")
+            if marker not in (0, 1, 2):
+                raise ValueError(
+                    f"Table '{spec.name}' change row {index} has invalid __rowMarker__ value {marker}."
+                )
+            key = tuple(row.get(column) for column in spec.key_columns)
+            if any(value is None for value in key):
+                raise ValueError(
+                    f"Table '{spec.name}' change row {index} has a null primary key value for {spec.key_columns}."
+                )
+
+
 def make_id(prefix: str, number: int) -> str:
     return f"{prefix}{number:05d}"
 
@@ -464,6 +506,7 @@ def build_initial_open_mirroring_layout(
     dataset: Mapping[str, Sequence[Mapping[str, object]]],
     output_dir: Path,
 ) -> None:
+    validate_dataset_primary_keys(dataset)
     ensure_clean_dir(output_dir)
     write_json(
         {
@@ -488,6 +531,7 @@ def build_initial_open_mirroring_layout(
 
 
 def write_snapshot(dataset: Mapping[str, Sequence[Mapping[str, object]]], snapshot_dir: Path) -> None:
+    validate_dataset_primary_keys(dataset)
     ensure_clean_dir(snapshot_dir)
     for table_name, rows in dataset.items():
         write_parquet(rows, snapshot_dir / f"{table_name}.parquet")
@@ -795,6 +839,7 @@ def write_incremental_changes(
     output_dir: Path,
     prior_dirs: Sequence[Path] = (),
 ) -> List[Path]:
+    validate_change_rows(changes)
     ensure_dir(output_dir)
     written: List[Path] = []
     for spec in TABLE_SPECS:
@@ -809,13 +854,19 @@ def write_incremental_changes(
     return written
 
 
-def parse_onelake_landing_zone(url: str) -> tuple[str, str, str]:
+def parse_onelake_landing_zone(url: str) -> tuple[str, str, str, str]:
     parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc != "onelake.dfs.fabric.microsoft.com":
-        raise ValueError("Landing zone URL must use https://onelake.dfs.fabric.microsoft.com/...")
+    if parsed.scheme != "https" or parsed.netloc not in (
+        "onelake.dfs.fabric.microsoft.com",
+        "onelake.blob.fabric.microsoft.com",
+    ):
+        raise ValueError(
+            "Landing zone URL must use https://onelake.dfs.fabric.microsoft.com/... "
+            "or https://onelake.blob.fabric.microsoft.com/..."
+        )
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 4:
         raise ValueError("Landing zone URL does not contain workspace GUID, item GUID, and Files path.")
     workspace_id, item_id = parts[0], parts[1]
     relative_path = "/".join(parts[2:])
-    return workspace_id, item_id, relative_path
+    return parsed.netloc, workspace_id, item_id, relative_path

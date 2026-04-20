@@ -9,6 +9,8 @@ from pathlib import Path
 from gps_fabric.open_mirroring import (
     mutate_dataset,
     read_snapshot,
+    validate_change_rows,
+    validate_dataset_primary_keys,
     write_incremental_changes,
     write_snapshot,
 )
@@ -58,7 +60,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     dataset = read_snapshot(args.snapshot_dir)
+    validate_dataset_primary_keys(dataset)
     changes = mutate_dataset(dataset, scale=args.scale)
+    validate_change_rows(changes)
     written = write_incremental_changes(
         changes,
         args.output_dir,

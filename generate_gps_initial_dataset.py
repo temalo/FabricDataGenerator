@@ -10,6 +10,7 @@ from gps_fabric.open_mirroring import (
     build_initial_dataset,
     build_initial_open_mirroring_layout,
     ensure_clean_dir,
+    validate_dataset_primary_keys,
     write_snapshot,
 )
 
@@ -56,6 +57,7 @@ def main() -> None:
         ensure_clean_dir(output_root)
 
     dataset = build_initial_dataset(scale=args.scale)
+    validate_dataset_primary_keys(dataset)
     build_initial_open_mirroring_layout(dataset, args.output_dir)
     write_snapshot(dataset, args.snapshot_dir)
 
@@ -67,4 +69,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

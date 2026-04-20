@@ -20,6 +20,10 @@ Files
   Creates new rows plus updates and deletes for existing data, and writes change files with `__rowMarker__`.
 - `publish_to_fabric_open_mirroring.py`
   Uploads a local open mirroring folder tree into a Fabric OneLake landing zone using the ADLS Gen2 compatible SDK.
+- `initial_load.ps1`
+  PowerShell wrapper for install, initial generation, and publish.
+- `incremental_load.ps1`
+  PowerShell wrapper for incremental generation and publish.
 - `gps_fabric/open_mirroring.py`
   Shared data model, generation logic, file sequencing, and OneLake URL parsing.
 
@@ -90,19 +94,46 @@ az login
 2. Dry-run the upload first.
 
 ```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --dry-run
+python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob --dry-run
 ```
 
 3. Upload the initial load.
 
 ```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial
+python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob
 ```
 
 4. Upload the incremental changes later.
 
 ```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_incremental
+python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_incremental --api blob
+```
+
+PowerShell wrappers
+-------------------
+
+Initial load:
+
+```powershell
+.\initial_load.ps1
+```
+
+Initial load with dependency install and a dry run:
+
+```powershell
+.\initial_load.ps1 -InstallRequirements -DryRunPublish
+```
+
+Incremental load:
+
+```powershell
+.\incremental_load.ps1
+```
+
+Incremental load dry run:
+
+```powershell
+.\incremental_load.ps1 -DryRunPublish
 ```
 
 Notes
@@ -110,9 +141,11 @@ Notes
 
 - The initial load files do not include `__rowMarker__`, which matches Fabric guidance for first-load data.
 - Incremental files do include `__rowMarker__` as the final column.
+- Every table has a declared primary key in `_metadata.json`, and the generator validates that keys are non-null and unique before writing files.
 - Delete rows are emitted for selected certification records to simulate lifecycle changes in source systems.
 - The publisher uses `DefaultAzureCredential`, so `az login` is the easiest local auth path.
-- The current implementation uploads files recursively and overwrites any matching remote file path.
+- The publisher uploads `_metadata.json` before table data files during the initial load.
+- The publisher can use either the OneLake Blob or DFS endpoint; `--api blob` is the default recommendation for uploads.
 
 Reference Basis
 ---------------
