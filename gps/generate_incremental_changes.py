@@ -16,7 +16,8 @@ from gps_fabric.open_mirroring import (
 )
 
 
-DEFAULT_OUTPUT_ROOT = Path("output")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_ROOT = _REPO_ROOT / "output" / "gps"
 DEFAULT_INCREMENTAL_DIR = DEFAULT_OUTPUT_ROOT / "open_mirroring_incremental"
 DEFAULT_SNAPSHOT_DIR = DEFAULT_OUTPUT_ROOT / "snapshots"
 DEFAULT_PRIOR_SEQUENCE_DIR = DEFAULT_OUTPUT_ROOT / "open_mirroring_initial"

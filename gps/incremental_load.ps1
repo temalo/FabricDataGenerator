@@ -7,14 +7,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$SolutionRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$RepoRoot = Split-Path $SolutionRoot -Parent
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 
 if (-not $PSBoundParameters.ContainsKey("PythonCommand") -and (Test-Path $VenvPython)) {
     $PythonCommand = $VenvPython
 }
 
-Set-Location $RepoRoot
+Set-Location $SolutionRoot
 
 function Invoke-Step {
     param(
@@ -32,13 +33,13 @@ Invoke-Step -Title "Checking Python" -Action {
 }
 
 Invoke-Step -Title "Generating incremental changes" -Action {
-    & $PythonCommand generate_gps_incremental_changes.py --scale $Scale
+    & $PythonCommand generate_incremental_changes.py --scale $Scale
 }
 
 Invoke-Step -Title "Publishing incremental changes to Fabric landing zone" -Action {
     $publishArgs = @(
         "publish_to_fabric_open_mirroring.py",
-        "--source-dir", "output/open_mirroring_incremental",
+        "--source-dir", (Join-Path $RepoRoot "output\gps\open_mirroring_incremental"),
         "--api", $Api
     )
 

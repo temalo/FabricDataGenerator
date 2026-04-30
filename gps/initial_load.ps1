@@ -8,14 +8,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$SolutionRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$RepoRoot = Split-Path $SolutionRoot -Parent
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 
 if (-not $PSBoundParameters.ContainsKey("PythonCommand") -and (Test-Path $VenvPython)) {
     $PythonCommand = $VenvPython
 }
 
-Set-Location $RepoRoot
+Set-Location $SolutionRoot
 
 function Invoke-Step {
     param(
@@ -34,18 +35,17 @@ Invoke-Step -Title "Checking Python" -Action {
 
 if ($InstallRequirements) {
     Invoke-Step -Title "Installing requirements" -Action {
-        & $PythonCommand -m pip install -r requirements.txt
+        & $PythonCommand -m pip install -r (Join-Path $RepoRoot "requirements.txt")
     }
 }
 
 Invoke-Step -Title "Generating initial dataset" -Action {
-    & $PythonCommand generate_gps_initial_dataset.py --scale $Scale
+    & $PythonCommand generate_initial_dataset.py --scale $Scale
 }
 
 Invoke-Step -Title "Publishing initial load to Fabric landing zone" -Action {
     $publishArgs = @(
         "publish_to_fabric_open_mirroring.py",
-        "--source-dir", "output/open_mirroring_initial",
         "--api", $Api
     )
 

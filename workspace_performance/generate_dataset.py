@@ -32,7 +32,8 @@ from dotenv import load_dotenv
 from faker import Faker
 
 
-DEFAULT_OUTPUT_DIR = Path("output/sqlmi_workspace_performance")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_OUTPUT_DIR = _REPO_ROOT / "output" / "workspace_performance" / "output"
 DEFAULT_SEED = 42027
 DEFAULT_DAYS = 45
 DEFAULT_SQL_SERVER = "temalo-mi.public.72232dac5390.database.windows.net,3342"

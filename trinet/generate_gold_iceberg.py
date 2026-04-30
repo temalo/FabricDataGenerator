@@ -85,7 +85,7 @@ from pathlib import Path
 # ─── Load .env ─────────────────────────────────────────────────────────────────
 from dotenv import load_dotenv
 
-_env_path = Path(__file__).parent / ".env"
+_env_path = Path(__file__).parent.parent / ".env"
 if not _env_path.exists():
     raise FileNotFoundError(
         f"\n[ERROR] .env file not found at: {_env_path}\n"

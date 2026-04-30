@@ -17,7 +17,8 @@ from azure.storage.filedatalake import DataLakeServiceClient
 from gps_fabric.open_mirroring import parse_onelake_landing_zone
 
 
-DEFAULT_SOURCE_DIR = Path("output/open_mirroring_initial")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SOURCE_DIR = _REPO_ROOT / "output" / "gps" / "open_mirroring_initial"
 DEFAULT_LANDING_ZONE = (
     "https://onelake.dfs.fabric.microsoft.com/"
     "14e9c878-6b48-4ab6-b393-a9b6af015d3a/"
