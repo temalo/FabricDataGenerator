@@ -18,6 +18,8 @@ Files
   Creates the initial relational dataset and writes open mirroring initial-load files.
 - `generate_gps_incremental_changes.py`
   Creates new rows plus updates and deletes for existing data, and writes change files with `__rowMarker__`.
+- `generate_workspace_performance_sqlmi_dataset.py`
+  Creates a Gensler-inspired workspace performance dataset as CSV plus SQL Server schema/import scripts for Azure SQL Managed Instance.
 - `publish_to_fabric_open_mirroring.py`
   Uploads a local open mirroring folder tree into a Fabric OneLake landing zone using the ADLS Gen2 compatible SDK.
 - `initial_load.ps1`
@@ -43,15 +45,25 @@ Generated Tables
 Install
 -------
 
+Create and activate a repo-local virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Run commands through the venv explicitly when it is not activated:
+
 ```bash
-python3 -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Generate Initial Data
 ---------------------
 
-```bash
-python3 generate_gps_initial_dataset.py --scale 1.0
+```powershell
+.\.venv\Scripts\python.exe generate_gps_initial_dataset.py --scale 1.0
 ```
 
 This creates:
@@ -64,11 +76,48 @@ The initial landing-zone folder contains one folder per table, each with:
 - `_metadata.json`
 - `00000000000000000001.parquet`
 
+Generate Azure SQL MI Workspace Demo Data
+-----------------------------------------
+
+```powershell
+.\.venv\Scripts\python.exe generate_workspace_performance_sqlmi_dataset.py --clean
+```
+
+This creates an import package under `output/sqlmi_workspace_performance/`:
+
+- `schema.sql`
+- `bulk_insert.sql` for Azure SQL Managed Instance import from Azure Blob Storage
+- one CSV per table
+- `dataset_summary.json`
+
+The default dataset models clients, buildings, floors, zones, spaces, design targets, bookings, badge events, hourly utilization, hourly environmental metrics, surveys, maintenance tickets, and daily design outcome scores.
+Run `schema.sql` in the target SQL MI database, upload the generated CSVs to Azure Blob Storage, update the placeholders in `bulk_insert.sql`, and then run `bulk_insert.sql`.
+
+To generate and directly populate Azure SQL Managed Instance / Azure SQL DB using the current Azure CLI login:
+
+```powershell
+az login
+.\.venv\Scripts\python.exe generate_workspace_performance_sqlmi_dataset.py --clean --load-sql
+```
+
+The SQL connection settings are read from `.env`:
+
+- `AZURE_SQL_SERVER`
+- `AZURE_SQL_DATABASE`
+- `AZURE_SQL_DRIVER`
+- `AZURE_SQL_SCHEMA`
+
+For a smaller trial run:
+
+```powershell
+.\.venv\Scripts\python.exe generate_workspace_performance_sqlmi_dataset.py --output-dir output/sqlmi_workspace_sample --scale 0.1 --days 7 --clean
+```
+
 Generate Incremental Changes
 ----------------------------
 
-```bash
-python3 generate_gps_incremental_changes.py --scale 1.0
+```powershell
+.\.venv\Scripts\python.exe generate_gps_incremental_changes.py --scale 1.0
 ```
 
 This reads the saved snapshot, mutates the dataset, and writes incremental files such as:
@@ -93,24 +142,26 @@ az login
 
 2. Dry-run the upload first.
 
-```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob --dry-run
+```powershell
+.\.venv\Scripts\python.exe publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob --dry-run
 ```
 
 3. Upload the initial load.
 
-```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob
+```powershell
+.\.venv\Scripts\python.exe publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_initial --api blob
 ```
 
 4. Upload the incremental changes later.
 
-```bash
-python3 publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_incremental --api blob
+```powershell
+.\.venv\Scripts\python.exe publish_to_fabric_open_mirroring.py --source-dir output/open_mirroring_incremental --api blob
 ```
 
 PowerShell wrappers
 -------------------
+
+The PowerShell wrappers automatically use `.venv\Scripts\python.exe` when it exists. You can still override the interpreter with `-PythonCommand`.
 
 Initial load:
 

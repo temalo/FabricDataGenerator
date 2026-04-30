@@ -8,6 +8,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$RepoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+
+if (-not $PSBoundParameters.ContainsKey("PythonCommand") -and (Test-Path $VenvPython)) {
+    $PythonCommand = $VenvPython
+}
+
+Set-Location $RepoRoot
 
 function Invoke-Step {
     param(
